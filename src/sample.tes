@@ -1,0 +1,35 @@
+funk <int> sum(numlist as vector) {
+    result :: int = 0;
+    </ This is a simple comment />
+    for (i = 0 to length(numlist))
+    begin
+        result = result + numlist[i];
+    endfor
+    
+    return result;
+}
+
+</ Comment level 1
+    </ Nested comment level 2 
+        </ Level 3 />
+    />
+    Continue level 1
+/>
+
+funk <str> greet(name as str) => return "Hello " + name;
+
+test :: str = "Hello \"World\"";
+escaped :: str = 'It\'s working';
+multiline :: mstr = """This is a
+multi-line
+string""";
+
+</ Test operators />
+a :: int = 10;
+b :: int = 20;
+result :: bool = (a <= b) && (a != 0);
+ternary :: int = result ? a : b;
+
+</ Array />
+arr :: vector = [1, 2, 3, 4, 5];
+element :: int = arr[0];
