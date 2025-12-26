@@ -17,7 +17,8 @@ class SemanticAnalyzer:
         self.current_scope = self.global_scope
         self.current_function: Optional[FuncSymbol] = None
 
-        
+        # Define built-in functions
+        # print accepts 'null' (any type)
         self.global_scope.define_func(FuncSymbol("print", "null", [("x", "null")], 0, 0))
         self.global_scope.define_func(FuncSymbol("length", "int", [("x", "vector")], 0, 0))
         self.global_scope.define_func(FuncSymbol("scan", "int", [], 0, 0)) 
@@ -26,15 +27,20 @@ class SemanticAnalyzer:
         self.errors.append(SemanticError(msg, node.line, node.column))
 
     def analyze(self, prog: Program) -> List[SemanticError]:
-        # 1) register top-level functions signatures
+        # 1) Register top-level function signatures
         for fn in prog.functions:
             if isinstance(fn, FunctionDef):
                 self._declare_function(fn, self.global_scope)
 
-        # 2) analyze each function
+        # 2) Analyze each function body
         for fn in prog.functions:
             if isinstance(fn, FunctionDef):
                 self._analyze_function(fn)
+
+        # 3) Check for entry point (main function)
+        main_fn = self.global_scope.lookup_func("main")
+        if not main_fn:
+            self.error("Program missing entry point: 'main' function is required.", prog)
 
         return self.errors
 
@@ -54,6 +60,7 @@ class SemanticAnalyzer:
                     p
                 )
             params.append((p.name, p.type_name))
+            
         ok = scope.define_func(FuncSymbol(fn.name, fn.return_type, params, fn.line, fn.column))
         if not ok:
             self.error(f"function '{fn.name}': duplicate function definition.", fn)
@@ -69,7 +76,7 @@ class SemanticAnalyzer:
         f_sym = self.global_scope.lookup_func(fn.name)
         self.current_function = f_sym
 
-        # params are assigned by definition
+        # Define parameters in scope (they are considered assigned)
         for pname, ptype in (f_sym.params if f_sym else []):
             self.current_scope.define_var(VarSymbol(pname, ptype, fn.line, fn.column, assigned=True))
 
@@ -87,10 +94,9 @@ class SemanticAnalyzer:
         self.current_function = None
 
     def _visit_block(self, block: Block):
-      
         for st in block.statements:
             if isinstance(st, FunctionDef):
-                # nested function: declare in current scope and analyze with nested scope
+                # Nested function: declare in current scope and analyze
                 self._declare_function(st, self.current_scope)
                 self._analyze_function(st)
             elif isinstance(st, VarDecl):
@@ -119,7 +125,6 @@ class SemanticAnalyzer:
                 self._pop_scope()
                 self._infer_expr(st.cond)
             elif isinstance(st, ForStmt):
-               
                 self._infer_expr(st.start)
                 self._infer_expr(st.end)
                 self._push_scope()
@@ -127,7 +132,6 @@ class SemanticAnalyzer:
                 self._visit_block(st.body)
                 self._pop_scope()
             else:
-                # unknown node
                 pass
 
     def _visit_vardecl(self, vd: VarDecl):
@@ -157,11 +161,9 @@ class SemanticAnalyzer:
             rtype = self._infer_expr(r.value)
         if self.current_function:
             expected = self.current_function.return_type
+            
             if expected != rtype and not (expected == "null" and rtype == "null"):
-                self.error(
-                    f"function '{self.current_function.name}': wrong return type. expected '{expected}' but got '{rtype}'.",
-                    r
-                )
+                 self._require_type(expected, rtype, r, "return value")
 
     # ---------- Expression typing ----------
     def _infer_expr(self, e: Expr) -> str:
@@ -203,18 +205,24 @@ class SemanticAnalyzer:
         if isinstance(e, BinaryOp):
             lt = self._infer_expr(e.left)
             rt = self._infer_expr(e.right)
+            
+            # Arithmetic
             if e.op in ("+", "-", "*", "/"):
                 self._require_type("int", lt, e.left, "arithmetic")
                 self._require_type("int", rt, e.right, "arithmetic")
                 return "int"
+            
+            # Comparison
             if e.op in ("<", ">", "<=", ">=", "==", "!="):
-             
-                if lt != rt:
+                # Allow comparison of same types (or any if unknown)
+                if lt != "any" and rt != "any" and lt != rt:
                     self.error(
                         f"function '{self.current_function.name if self.current_function else '<?>'}': comparison types mismatch '{lt}' vs '{rt}'.",
                         e
                     )
                 return "bool"
+            
+            # Logical
             if e.op in ("&&", "||"):
                 self._require_type("bool", lt, e.left, "logical")
                 self._require_type("bool", rt, e.right, "logical")
@@ -226,17 +234,22 @@ class SemanticAnalyzer:
             self._require_type("bool", ct, e.cond, "ternary condition")
             tt = self._infer_expr(e.then_expr)
             et = self._infer_expr(e.else_expr)
-            if tt != et:
+            if tt != "any" and et != "any" and tt != et:
                 self.error(
                     f"function '{self.current_function.name if self.current_function else '<?>'}': ternary branches have different types '{tt}' and '{et}'.",
                     e
                 )
-            return tt
+            return tt if tt != "any" else et
 
         if isinstance(e, VectorLiteral):
-            # vector literal => vector
-            for it in e.items:
-                self._infer_expr(it)
+            if not e.items:
+                return "vector"
+            # Homogeneity check: all elements should generally be of the same type
+            first_t = self._infer_expr(e.items[0])
+            for item in e.items[1:]:
+                t = self._infer_expr(item)
+                if t != "any" and first_t != "any" and t != first_t:
+                     self.error(f"Vector literal contains mixed types: '{first_t}' vs '{t}'.", item)
             return "vector"
 
         if isinstance(e, Index):
@@ -244,8 +257,8 @@ class SemanticAnalyzer:
             it = self._infer_expr(e.index)
             self._require_type("vector", bt, e.base, "index base")
             self._require_type("int", it, e.index, "index")
-            # spec doesn't define element types -> treat as int for now
-            return "int"
+            
+            return "any"
 
         if isinstance(e, Call):
             fn_name = e.func.name
@@ -256,13 +269,13 @@ class SemanticAnalyzer:
                     self._infer_expr(a)
                 return "null"
 
-            # arg count check :contentReference[oaicite:8]{index=8}
             if len(e.args) != len(f.params):
                 self.error(
                     f"function '{fn_name}': expects {len(f.params)} arguments but got {len(e.args)}.",
                     e
                 )
-            # type check for shared prefix
+            
+            # Check argument types
             for i, arg in enumerate(e.args[:len(f.params)]):
                 expected = f.params[i][1]
                 got = self._infer_expr(arg)
@@ -272,8 +285,15 @@ class SemanticAnalyzer:
         return "null"
 
     def _require_type(self, expected: str, got: str, node: Node, ctx: str):
+        """
+        Validates that 'got' type matches 'expected' type.
+        Allows 'null' (void/untyped params) and 'any' (dynamic from vector index) to pass.
+        """
         if expected == "null":
             return
+        if got == "any": 
+            return # 'any' matches everything (safe assumption for array access)
+            
         if expected != got:
             self.error(
                 f"function '{self.current_function.name if self.current_function else '<?>'}': {ctx} expected to be of type '{expected}', but got '{got}' instead.",
@@ -282,8 +302,4 @@ class SemanticAnalyzer:
 
     def _check_return_type(self, fn: FunctionDef, got: str, node: Node):
         expected = fn.return_type
-        if expected != got:
-            self.error(
-                f"function '{fn.name}': wrong return type. expected '{expected}' but got '{got}'.",
-                node
-            )
+        self._require_type(expected, got, node, "return value")
